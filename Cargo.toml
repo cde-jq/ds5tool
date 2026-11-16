@@ -1,0 +1,11 @@
+[package]
+name = "ds5tool"
+version = "0.1.0"
+edition = "2021"
+description = "Hold PS + L1 on a DualSense controller to run a configurable command"
+
+[dependencies]
+anyhow = "1"
+hidapi = "2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

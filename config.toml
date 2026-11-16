@@ -1,0 +1,42 @@
+# 组合键默认的按住时长（毫秒）。每个 [combos.*] 可以用 hold_ms 单独覆盖。
+hold_ms = 3000
+
+# 每个组合键都是可选的；不需要的整段注释掉即可。
+# shell、args、workdir、hide_window 与之前的配置含义相同。
+
+# 固定功能（无需配置）：按住 PS + Create（触摸板左侧按键）2 秒，
+# 会停止最后一次启动的非 shell 命令（shell = false 的组合键或 [on_connect] 命令）。
+
+# ---------------- PS + L1 ----------------
+[combos.l1]
+shell = true
+command = 'shutdown /f /s /t 0'
+args = []
+# workdir = "C:\\path\\to\\dir"
+# hide_window = true
+
+# ---------------- PS + L2（可选） ----------------
+# [combos.l2]
+# hold_ms = 2000
+# shell = true
+# command = 'C:\Tools\example-l2.exe'
+# args = []
+
+# ---------------- PS + R1（可选） ----------------
+# [combos.r1]
+# shell = true
+# command = 'C:\Tools\example-r1.exe'
+
+# ---------------- PS + R2（可选） ----------------
+# [combos.r2]
+# hold_ms = 1000
+# shell = true
+# command = 'C:\Tools\example-r2.exe'
+
+# ---------------- 手柄连接时执行（可选） ----------------
+# [on_connect]
+# shell = true
+# command = 'C:\Program Files (x86)\Steam\Steam.exe'
+# args = ['-bigpicture']
+# workdir = "C:\\path\\to\\dir"
+# hide_window = true
