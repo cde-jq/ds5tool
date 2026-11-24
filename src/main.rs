@@ -4,7 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use config::{Action, Button, Config, ProcessTracker};
+use config::{Button, Config, ProcessTracker};
 use hidapi::{BusType, HidApi, HidDevice};
 
 /// Sony 的 USB 厂商 ID。
@@ -37,20 +37,41 @@ fn main() -> Result<()> {
                 "  PS + {}：按住 {:.1} 秒，命令: {}",
                 binding.button.name(),
                 binding.hold_ms as f64 / 1000.0,
-                command_summary(&binding.action)
+                binding.action.summary()
             );
         }
     }
     if let Some(action) = &config.on_connect {
-        println!("已配置手柄连接时执行命令: {}", command_summary(action));
+        println!(
+            "已配置手柄连接时执行命令（仅首次连接）: {}",
+            action.summary()
+        );
     }
     println!(
         "停止功能：按住 PS + Create（触摸板左侧）{:.1} 秒，停止最后一次启动的非 shell 命令。",
         STOP_HOLD_MS as f64 / 1000.0
     );
 
-    let mut tracker = ProcessTracker::default();
+    let mut tracker = ProcessTracker::new(config.remember_path.clone());
+    if let Some(path) = &config.remember_path {
+        println!("持久化已启用：记录文件: {}", path.display());
+        match tracker.saved() {
+            Some(action) => {
+                println!("已读取上次记录的命令: {}", action.summary());
+                if config.on_connect.is_some() {
+                    println!("首次连接时将优先执行该命令，并跳过 [on_connect]。");
+                } else {
+                    println!("首次连接时将执行该命令。");
+                }
+            }
+            None => println!("记录文件中暂无可恢复的命令。"),
+        }
+    }
+
     let mut waiting = false;
+    // 连接命令（恢复的命令或 [on_connect]）在本次运行期间只执行一次，
+    // 之后手柄断开重连不再触发。
+    let mut connect_action_done = false;
 
     loop {
         let api = match HidApi::new() {
@@ -93,9 +114,14 @@ fn main() -> Result<()> {
             println!("已连接: {name} (序列号 {serial})");
         }
 
-        if let Some(action) = &config.on_connect {
-            println!("执行手柄连接命令...");
-            tracker.run(action, "连接");
+        if !connect_action_done {
+            connect_action_done = true;
+            if !tracker.run_saved() {
+                if let Some(action) = &config.on_connect {
+                    println!("执行手柄连接命令...");
+                    tracker.run_without_saving(action, "连接");
+                }
+            }
         }
 
         // 蓝牙连接默认可能只发送 10 字节的简化报告。读取一次 feature
@@ -110,14 +136,6 @@ fn main() -> Result<()> {
         }
         println!("等待 DualSense 重新连接...");
         thread::sleep(Duration::from_secs(1));
-    }
-}
-
-fn command_summary(action: &Action) -> String {
-    if action.args.is_empty() {
-        action.command.clone()
-    } else {
-        format!("{} {:?}", action.command, action.args)
     }
 }
 

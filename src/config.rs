@@ -1,9 +1,12 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+/// 启用 `remember_last_command` 时，记录文件的名字（与配置文件同目录）。
+const SAVED_COMMAND_FILE: &str = "last_command.toml";
 
 /// 解析后的配置。
 #[derive(Debug)]
@@ -12,6 +15,9 @@ pub struct Config {
     pub bindings: Vec<Binding>,
     /// 手柄连接时执行的动作。
     pub on_connect: Option<Action>,
+    /// 记录最后一次组合键启动的非 shell 命令的文件。
+    /// `None` 表示没有启用 `remember_last_command`。
+    pub remember_path: Option<PathBuf>,
 }
 
 /// 一个已启用的组合键绑定。
@@ -43,7 +49,7 @@ impl Button {
 }
 
 /// 一个可配置的动作：执行什么命令、怎么执行。
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Action {
     /// true: 通过 `cmd.exe /C` 执行 command；false: 直接启动 command。
     #[serde(default = "default_shell")]
@@ -90,6 +96,11 @@ struct RawConfig {
 
     #[serde(default)]
     on_connect: Option<Action>,
+
+    /// 是否把最后一次由组合键启动的非 shell 命令记录到文件，
+    /// 并在下次启动时读取、在手柄连接时优先执行。
+    #[serde(default)]
+    remember_last_command: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -131,19 +142,23 @@ impl Config {
         let path = config_path();
         let text = fs::read_to_string(&path)
             .with_context(|| format!("无法读取配置文件 {}", path.display()))?;
-        let config =
-            Self::parse(&text).with_context(|| format!("配置文件格式错误 {}", path.display()))?;
+        let base_dir = path
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let config = Self::parse(&text, base_dir)
+            .with_context(|| format!("配置文件格式错误 {}", path.display()))?;
 
         println!("配置文件: {}", path.display());
         Ok(config)
     }
 
-    fn parse(text: &str) -> Result<Self> {
+    fn parse(text: &str, base_dir: &Path) -> Result<Self> {
         let raw: RawConfig = toml::from_str(text)?;
-        Self::from_raw(raw)
+        Self::from_raw(raw, base_dir)
     }
 
-    fn from_raw(raw: RawConfig) -> Result<Self> {
+    fn from_raw(raw: RawConfig, base_dir: &Path) -> Result<Self> {
         let mut bindings = Vec::new();
 
         // 旧写法：顶层 command 等价于 PS + L1。
@@ -195,6 +210,9 @@ impl Config {
         Ok(Self {
             bindings,
             on_connect: raw.on_connect,
+            remember_path: raw
+                .remember_last_command
+                .then(|| base_dir.join(SAVED_COMMAND_FILE)),
         })
     }
 }
@@ -205,6 +223,15 @@ impl Action {
             bail!("配置项 {field} 不能为空");
         }
         Ok(())
+    }
+
+    /// 供日志显示的简短命令描述。
+    pub fn summary(&self) -> String {
+        if self.args.is_empty() {
+            self.command.clone()
+        } else {
+            format!("{} {:?}", self.command, self.args)
+        }
     }
 
     /// 执行动作，`label` 用于日志中标识触发来源。
@@ -253,16 +280,136 @@ impl Action {
     }
 }
 
+/// 记录到文件中的一条非 shell 命令。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SavedCommand {
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<PathBuf>,
+    #[serde(default = "default_true")]
+    pub hide_window: bool,
+}
+
+impl SavedCommand {
+    fn from_action(action: &Action) -> Self {
+        Self {
+            command: action.command.clone(),
+            args: action.args.clone(),
+            workdir: action.workdir.clone(),
+            hide_window: action.hide_window,
+        }
+    }
+
+    fn to_action(&self) -> Action {
+        Action {
+            shell: false,
+            command: self.command.clone(),
+            args: self.args.clone(),
+            workdir: self.workdir.clone(),
+            hide_window: self.hide_window,
+        }
+    }
+
+    /// 从记录文件读取命令；文件不存在或内容无效时返回 `None`。
+    fn load(path: &Path) -> Option<Action> {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(err) => {
+                eprintln!("读取记录文件失败 {}: {err}", path.display());
+                return None;
+            }
+        };
+
+        match toml::from_str::<Self>(&text) {
+            Ok(saved) => {
+                let action = saved.to_action();
+                if action.command.trim().is_empty() {
+                    eprintln!("记录文件中的命令为空，已忽略: {}", path.display());
+                    None
+                } else {
+                    Some(action)
+                }
+            }
+            Err(err) => {
+                eprintln!("记录文件格式错误 {}: {err}", path.display());
+                None
+            }
+        }
+    }
+
+    fn save(&self, path: &Path) {
+        match toml::to_string(self) {
+            Ok(text) => {
+                if let Err(err) = fs::write(path, text) {
+                    eprintln!("写入记录文件失败 {}: {err}", path.display());
+                } else {
+                    println!("已记录命令: {}", path.display());
+                }
+            }
+            Err(err) => eprintln!("序列化记录失败: {err}"),
+        }
+    }
+}
+
 /// 跟踪最后一次启动的非 shell 命令，供 PS + Create 停止。
 #[derive(Default)]
 pub struct ProcessTracker {
     last: Option<Child>,
+    /// 启用持久化时的记录文件路径。
+    save_path: Option<PathBuf>,
+    /// 启动时恢复的命令；启用持久化后，组合键启动的新命令会覆盖它。
+    saved: Option<Action>,
 }
 
 impl ProcessTracker {
-    /// 执行动作，并记住最后一次启动的非 shell 命令。
+    /// 创建跟踪器；`save_path` 为 `Some` 时启用持久化，并尝试读取文件中
+    /// 上次记录的命令。
+    pub fn new(save_path: Option<PathBuf>) -> Self {
+        let saved = save_path.as_deref().and_then(SavedCommand::load);
+        Self {
+            last: None,
+            save_path,
+            saved,
+        }
+    }
+
+    /// 启动时从文件恢复的命令。
+    pub fn saved(&self) -> Option<&Action> {
+        self.saved.as_ref()
+    }
+
+    /// 执行组合键动作：记住最后一次启动的非 shell 命令，启用持久化时写入文件。
     pub fn run(&mut self, action: &Action, label: &str) {
+        self.launch(action, label, true);
+    }
+
+    /// 执行动作但不多写记录文件（用于 `[on_connect]`）。
+    pub fn run_without_saving(&mut self, action: &Action, label: &str) {
+        self.launch(action, label, false);
+    }
+
+    /// 执行启动时恢复的命令；没有可恢复的命令时返回 `false`。
+    pub fn run_saved(&mut self) -> bool {
+        let Some(action) = self.saved.clone() else {
+            return false;
+        };
+
+        println!("执行上次记录的命令: {}", action.summary());
+        self.launch(&action, "记录", false);
+        true
+    }
+
+    fn launch(&mut self, action: &Action, label: &str, persist: bool) {
         if let Some(child) = action.execute(label) {
+            if persist {
+                if let Some(path) = &self.save_path {
+                    self.saved = Some(action.clone());
+                    SavedCommand::from_action(action).save(path);
+                }
+            }
             self.last = Some(child);
         }
     }
@@ -329,11 +476,22 @@ fn config_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, Button, Config, ProcessTracker};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use super::{Action, Button, Config, ProcessTracker, SavedCommand};
+
+    fn parse(text: &str) -> Config {
+        Config::parse(text, Path::new(".")).unwrap()
+    }
+
+    fn parse_result(text: &str) -> anyhow::Result<Config> {
+        Config::parse(text, Path::new("."))
+    }
 
     #[test]
     fn parses_legacy_top_level_l1() {
-        let config = Config::parse(
+        let config = parse(
             r#"
 hold_ms = 1500
 shell = false
@@ -341,8 +499,7 @@ command = 'C:\Tools\trigger.exe'
 args = ['--now']
 hide_window = false
 "#,
-        )
-        .unwrap();
+        );
 
         assert_eq!(config.bindings.len(), 1);
         let binding = &config.bindings[0];
@@ -356,7 +513,7 @@ hide_window = false
 
     #[test]
     fn parses_all_combos_with_hold_overrides() {
-        let config = Config::parse(
+        let config = parse(
             r#"
 hold_ms = 3000
 
@@ -374,8 +531,7 @@ command = 'three.exe'
 hold_ms = 800
 command = 'four.exe'
 "#,
-        )
-        .unwrap();
+        );
 
         assert_eq!(config.bindings.len(), 4);
         assert_eq!(config.bindings[0].button, Button::L1);
@@ -390,13 +546,12 @@ command = 'four.exe'
 
     #[test]
     fn combos_are_optional() {
-        let config = Config::parse(
+        let config = parse(
             r#"
 [combos.r2]
 command = 'only.exe'
 "#,
-        )
-        .unwrap();
+        );
 
         assert_eq!(config.bindings.len(), 1);
         assert_eq!(config.bindings[0].button, Button::R2);
@@ -405,7 +560,7 @@ command = 'only.exe'
 
     #[test]
     fn rejects_duplicate_l1_definition() {
-        let result = Config::parse(
+        let result = parse_result(
             r#"
 command = 'legacy.exe'
 
@@ -419,13 +574,12 @@ command = 'new.exe'
 
     #[test]
     fn allows_on_connect_without_combos() {
-        let config = Config::parse(
+        let config = parse(
             r#"
 [on_connect]
 command = 'notepad.exe'
 "#,
-        )
-        .unwrap();
+        );
 
         assert!(config.bindings.is_empty());
         assert!(config.on_connect.is_some());
@@ -433,12 +587,12 @@ command = 'notepad.exe'
 
     #[test]
     fn rejects_empty_config() {
-        assert!(Config::parse("").is_err());
+        assert!(parse_result("").is_err());
     }
 
     #[test]
     fn parses_on_connect_action() {
-        let config = Config::parse(
+        let config = parse(
             r#"
 [combos.l1]
 command = 'notepad.exe'
@@ -447,8 +601,7 @@ command = 'notepad.exe'
 command = 'notepad.exe'
 args = ['hello.txt']
 "#,
-        )
-        .unwrap();
+        );
 
         let on_connect = config.on_connect.unwrap();
         assert_eq!(on_connect.command, "notepad.exe");
@@ -489,5 +642,92 @@ args = ['hello.txt']
         );
         assert!(tracker.stop_last());
         assert!(!tracker.stop_last(), "句柄已被移除，不应再次停止");
+    }
+
+    #[test]
+    fn remember_last_command_is_a_toggle() {
+        let disabled = parse(
+            r#"
+[combos.l1]
+command = 'notepad.exe'
+"#,
+        );
+        assert!(disabled.remember_path.is_none());
+
+        let enabled = parse(
+            r#"
+remember_last_command = true
+
+[combos.l1]
+command = 'notepad.exe'
+"#,
+        );
+        assert_eq!(
+            enabled.remember_path,
+            Some(Path::new(".").join("last_command.toml"))
+        );
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ds5tool-test-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn persists_and_restores_last_combo_command() {
+        let dir = temp_dir("remember");
+        let path = dir.join("last_command.toml");
+
+        let mut tracker = ProcessTracker::new(Some(path.clone()));
+        assert!(tracker.saved().is_none());
+
+        tracker.run(&action(false, "cmd.exe", &["/C", "exit"]), "测试");
+        assert!(path.is_file(), "非 shell 命令应写入记录文件");
+
+        let mut restored = ProcessTracker::new(Some(path.clone()));
+        let saved = restored.saved().expect("应能从文件恢复命令");
+        assert_eq!(saved.command, "cmd.exe");
+        assert_eq!(saved.args, vec!["/C", "exit"]);
+        assert!(!saved.shell);
+        assert!(restored.run_saved());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saved_command_round_trips_paths() {
+        let saved = SavedCommand {
+            command: r"C:\Tools\app.exe".to_string(),
+            args: vec!["--data".to_string(), r"D:\data".to_string()],
+            workdir: Some(PathBuf::from(r"C:\Tools")),
+            hide_window: false,
+        };
+
+        let text = toml::to_string(&saved).unwrap();
+        let parsed: SavedCommand = toml::from_str(&text).unwrap();
+        let action = parsed.to_action();
+
+        assert_eq!(action.command, r"C:\Tools\app.exe");
+        assert_eq!(action.args, vec!["--data", r"D:\data"]);
+        assert_eq!(action.workdir, Some(PathBuf::from(r"C:\Tools")));
+        assert!(!action.shell);
+        assert!(!action.hide_window);
+    }
+
+    #[test]
+    fn does_not_persist_shell_or_on_connect_commands() {
+        let dir = temp_dir("no-save");
+        let path = dir.join("last_command.toml");
+
+        let mut tracker = ProcessTracker::new(Some(path.clone()));
+        tracker.run(&action(true, "exit 0", &[]), "测试");
+        assert!(!path.exists(), "shell 命令不应写入记录文件");
+
+        tracker.run_without_saving(&action(false, "cmd.exe", &["/C", "exit"]), "连接");
+        assert!(!path.exists(), "[on_connect] 命令不应写入记录文件");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

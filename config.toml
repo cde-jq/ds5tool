@@ -4,6 +4,12 @@ hold_ms = 3000
 # 每个组合键都是可选的；不需要的整段注释掉即可。
 # shell、args、workdir、hide_window 与之前的配置含义相同。
 
+# 是否记住最后一次由组合键启动的非 shell 命令（默认 false）：
+# - 记录到与 config.toml 同目录的 last_command.toml
+# - 程序启动时读取该文件
+# - 下次启动后的首次手柄连接时优先执行记录的命令，并跳过 [on_connect]
+# remember_last_command = true
+
 # 固定功能（无需配置）：按住 PS + Create（触摸板左侧按键）2 秒，
 # 会停止最后一次启动的非 shell 命令（shell = false 的组合键或 [on_connect] 命令）。
 
@@ -33,7 +39,8 @@ args = []
 # shell = true
 # command = 'C:\Tools\example-r2.exe'
 
-# ---------------- 手柄连接时执行（可选） ----------------
+# ---------------- 手柄首次连接时执行（可选） ----------------
+# 只在程序运行期间第一次成功连接手柄时执行，断开重连不会再次触发。
 # [on_connect]
 # shell = true
 # command = 'C:\Program Files (x86)\Steam\Steam.exe'

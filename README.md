@@ -5,7 +5,7 @@
 - **PS + L1 / L2 / R1 / R2 持续按住超过设定时间**（每个组合键可单独配置时长）
 - **手柄连接成功时**（可选）
 
-另外，**PS + Create（触摸板左侧按键）持续按住 2 秒**会停止最后一次启动的非 shell 命令。
+另外，**PS + Create（触摸板左侧按键）持续按住 2 秒**会停止最后一次启动的非 shell 命令；还可以打开开关，把最后一次由组合键启动的非 shell 命令记录到文件，下次启动后的首次手柄连接时自动恢复。
 
 ## 功能
 
@@ -17,7 +17,8 @@
 - 每个组合键独立计时、独立命令、独立按住时长
 - 按住组合键期间只触发一次，松开后才允许再次触发
 - 按住 `PS + Create` 2 秒可停止最后一次启动的**非 shell** 命令
-- 手柄每次连接成功时可执行一条命令
+- 可选：记住最后一次由组合键启动的非 shell 命令，下次启动读取，手柄首次连接时优先执行
+- 手柄首次连接成功时可执行一条命令（程序运行期间只触发一次，断开重连不再执行）
 - 命令、按住时长、工作目录、是否隐藏窗口均可配置
 
 ## 构建
@@ -65,7 +66,7 @@ ds5tool 已启动
 已加载 2 个组合键：
   PS + L1：按住 3.0 秒，命令: notepad.exe
   PS + R2：按住 1.0 秒，命令: shutdown /s /t 0
-已配置手柄连接时执行命令: C:\Tools\on-connect.exe ["--device", "dualsense"]
+已配置手柄连接时执行命令（仅首次连接）: C:\Tools\on-connect.exe ["--device", "dualsense"]
 停止功能：按住 PS + Create（触摸板左侧）2.0 秒，停止最后一次启动的非 shell 命令。
 等待 DualSense 连接...
 已连接: Wireless Controller (序列号 ...)
@@ -112,6 +113,13 @@ args = []
 # hold_ms = 1000
 # command = 'C:\Tools\example-r2.exe'
 ```
+
+顶层配置：
+
+| 字段 | 是否必填 | 说明 |
+| --- | --- | --- |
+| `hold_ms` | 否 | 组合键默认按住时长，默认 3000 毫秒 |
+| `remember_last_command` | 否 | 默认 `false`；设为 `true` 时记录最后一次组合键启动的非 shell 命令 |
 
 每个组合键支持以下字段：
 
@@ -177,7 +185,7 @@ command = 'powershell -NoProfile -WindowStyle Hidden -Command "Stop-Process -Nam
 hide_window = true
 ```
 
-### 示例：手柄连接时执行命令
+### 示例：手柄首次连接时执行命令
 
 在配置文件末尾添加 `[on_connect]` 段：
 
@@ -190,11 +198,12 @@ args = ['--device', 'dualsense']
 hide_window = true
 ```
 
-只要程序成功打开手柄就会执行一次，包括：
+程序运行期间只在第一次成功打开手柄时执行一次，触发场景包括：
 
-- 插上 USB 或蓝牙连接成功时
 - 程序启动时手柄已经连接
-- 手柄断开后重新连接
+- 启动后第一次插上 USB 或蓝牙连接成功
+
+之后手柄断开再重连不会再次触发；想再次执行需要重启程序。
 
 `[on_connect]` 内部支持 `shell`、`command`、`args`、`workdir`、`hide_window`，含义与 `[combos.*]` 相同。
 
@@ -215,7 +224,7 @@ args = []
 
 按住 **PS + Create**（Create 是触摸板左侧的小按键）**2 秒**，程序会停止最后一次启动的**非 shell** 命令：
 
-- 只跟踪 `shell = false` 的命令（包括组合键命令和 `[on_connect]` 命令）
+- 只跟踪 `shell = false` 的命令（包括组合键命令、`[on_connect]` 命令和恢复执行的命令）
 - 只停止最近一次启动的那一个进程；启动新的非 shell 命令后，旧的句柄会被替换，旧进程不会被自动结束
 - 如果该进程已经自行退出，会提示“已经结束，无需停止”
 - 这个功能固定为 2 秒，不需要也不能通过配置修改
@@ -224,6 +233,49 @@ args = []
 > 注意：`shell = true` 的命令是通过 `cmd.exe /C` 启动的，实际程序往往是 `cmd.exe` 的子进程，无法通过 `cmd.exe` 的句柄可靠地停止，因此这类命令不会被跟踪。需要能被停止时请使用 `shell = false`。
 
 > 注意：在蓝牙模式下，PS + Create 也是 DualSense 的配对快捷键，按住 2 秒可能同时进入配对状态。
+
+## 记住最后一次命令（可选）
+
+在 `config.toml` 顶层打开开关：
+
+```toml
+remember_last_command = true
+```
+
+启用后：
+
+- 每次由组合键启动 **非 shell** 命令（`shell = false`）成功后，把 `command`、`args`、`workdir`、`hide_window` 写入配置文件同目录的 `last_command.toml`
+- 程序启动时读取该文件，并在日志中显示恢复到的命令
+- 程序启动后的首次手柄连接时，如果存在记录，优先执行记录的命令，并**跳过** `[on_connect]`；没有记录时才执行 `[on_connect]`
+- 连接命令每次运行只执行一次，之后手柄断开重连不会再次触发
+- `shell = true` 的命令、`[on_connect]` 启动的命令不会写入记录
+- PS + Create 的停止功能同样适用于恢复执行的命令
+
+记录文件是普通的 TOML，可以手动删除或修改；删除后下次启动就没有可恢复的命令：
+
+```toml
+command = "C:\\Tools\\app.exe"
+args = ["--mode", "one"]
+workdir = "C:\\Tools"
+hide_window = true
+```
+
+启用并恢复成功时，启动日志类似：
+
+```
+持久化已启用：记录文件: D:\code\ds5tool\last_command.toml
+已读取上次记录的命令: C:\Tools\app.exe ["--mode", "one"]
+手柄首次连接时将优先执行该命令，并跳过 [on_connect]。
+...
+已连接: Wireless Controller (序列号 ...)
+执行上次记录的命令: C:\Tools\app.exe ["--mode", "one"]
+```
+
+如果记录文件不存在，会显示“记录文件中暂无可恢复的命令。”，首次连接时仍按原来的 `[on_connect]` 逻辑执行。每次组合键成功启动命令后还会打印：
+
+```
+已记录命令: D:\code\ds5tool\last_command.toml
+```
 
 > 修改配置后需要重启程序。
 
@@ -292,16 +344,26 @@ PS = buttons[2] & 0x01
 
 ### 5. 连接时触发
 
-程序在成功打开手柄后检查 `on_connect` 配置。每次建立连接（包括启动时手柄已连接、断开后重新连接）都会执行一次。连接命令和组合键命令共用同一套执行逻辑（`Action::execute`）。
+程序在成功打开手柄后检查 `on_connect` 配置。程序运行期间只在**第一次**成功打开手柄时执行一次（包括启动时手柄已连接、启动后首次连接成功）；之后断开重连会跳过，不再执行。首次连接时如果启用了 `remember_last_command` 并且存在记录，会优先执行记录的命令并跳过 `[on_connect]`。连接命令和组合键命令共用同一套执行逻辑（`Action::execute`）。
 
 ### 6. 停止最后一次非 shell 命令
 
 `ProcessTracker` 保存最近一次 `shell = false` 动作启动的 `Child`：
 
 - `Action::execute` 只对非 shell 命令返回 `Child`，shell 命令返回 `None`
-- 组合键命令和 `[on_connect]` 命令都通过 `ProcessTracker::run` 执行，因此都会参与跟踪
+- 组合键命令通过 `ProcessTracker::run` 执行，`[on_connect]` 命令通过 `ProcessTracker::run_without_saving` 执行；两者都会参与 PS + Create 的停止跟踪
 - 按住 `PS + Create` 2 秒时调用 `ProcessTracker::stop_last()`：先用 `try_wait()` 判断进程是否还活着，再用 `kill()` 结束它
 - 启动新的非 shell 命令会替换旧句柄，不主动结束旧进程
+
+### 7. 记住并恢复最后一次命令
+
+- `remember_last_command = true` 时，`ProcessTracker` 会把组合键启动的非 shell 命令写入与 `config.toml` 同目录的 `last_command.toml`
+- 文件内容由 `SavedCommand` 表示，只保存 `command`、`args`、`workdir`、`hide_window`；恢复时固定按 `shell = false` 执行
+- 程序启动时 `ProcessTracker::new` 尝试读取该文件，成功则保存在 `saved` 字段并打印日志；文件不存在或格式错误只是忽略并给出提示
+- 组合键命令通过 `ProcessTracker::run` 执行并更新记录；`[on_connect]` 通过 `ProcessTracker::run_without_saving` 执行，不写入文件
+- 首次连接时先调用 `ProcessTracker::run_saved()`；返回 `true` 表示已执行恢复命令，此时跳过 `[on_connect]`；否则按原逻辑执行 `[on_connect]`
+- 主循环用 `connect_action_done` 标记连接命令是否已执行，执行过一次后断开重连不会再次触发
+- 恢复执行的命令也会作为“最后一次非 shell 命令”被跟踪，因此可以用 PS + Create 停止
 
 ## 开机自启 / 后台运行
 
@@ -334,7 +396,11 @@ PS = buttons[2] & 0x01
 - **PS + Create 也是蓝牙配对快捷键**：蓝牙模式下按住 2 秒，手柄可能同时进入配对状态。
 - **只能停止非 shell 命令**：`shell = true` 的命令由 `cmd.exe /C` 启动，程序无法可靠地停止其真正的子进程。
 - **只停止最近一次启动的非 shell 命令**：如果之后又启动了新的非 shell 命令，再按 PS + Create 只会停止新的那个。
-- **连接命令会重复执行**：每次重新连接都会触发 `[on_connect]`，如果命令本身有副作用（例如启动程序），请自行确保可重复执行。
+- **只记录组合键命令**：`remember_last_command` 只保存组合键启动的非 shell 命令，`shell = true` 的命令和 `[on_connect]` 命令不会写入记录文件。
+- **恢复命令会跳过 `[on_connect]`**：启用记录且存在记录时，首次连接只执行记录的命令；想恢复原始连接行为，删除 `last_command.toml` 即可。
+- **连接命令只在首次连接执行**：恢复的命令和 `[on_connect]` 都只在程序运行期间第一次成功连接手柄时触发，断开重连不会再次执行；需要再次触发请重启程序。
+- **记录文件可手动编辑**：`last_command.toml` 是普通 TOML，可以修改或删除；格式错误时程序会提示并忽略该记录。
+- **记录文件会被自动执行**：启用后，`last_command.toml` 中的命令会在程序运行后的首次手柄连接时自动运行，请不要把不可信内容写入该文件。
 - **命令权限**：程序以当前用户权限运行；需要管理员权限的命令请以管理员身份启动它。
 - **PS 键**：程序读取的是 HID 原始报告中的 PS 键，不依赖 Windows 的游戏控制器映射。
 - **蓝牙延迟/省电**：部分蓝牙适配器会在空闲时降低轮询率；如果计时不准确，优先使用 USB 连接。
@@ -343,9 +409,10 @@ PS = buttons[2] & 0x01
 ## 代码结构
 
 ```
-src/main.rs     HID 设备查找、按键解析、组合键计时、PS + Create 停止
-src/config.rs   config.toml 读取、组合键动作、命令执行与进程跟踪
+src/main.rs     HID 设备查找、按键解析、组合键计时、PS + Create 停止、恢复命令
+src/config.rs   config.toml 读取、组合键动作、命令执行、进程跟踪与命令记录
 config.toml     默认配置文件
+last_command.toml  启用 remember_last_command 后自动生成的命令记录
 ```
 
 ## 可以继续扩展的方向
